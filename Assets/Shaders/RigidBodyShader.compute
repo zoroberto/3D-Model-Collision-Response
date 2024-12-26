@@ -560,10 +560,10 @@ bool AABBCollision(BoundingBox boxA, BoundingBox boxB)
 }
 
 
-// #pragma kernel UpdateCollidedNodeFlag
-// [numthreads(1024, 1, 1)]
-// void UpdateCollidedNodeFlag(uint3 id : SV_DispatchThreadID)
-// {
+#pragma kernel UpdateCollidedNodeFlag
+[numthreads(1024, 1, 1)]
+void UpdateCollidedNodeFlag(uint3 id : SV_DispatchThreadID)
+{
 //     uint i = id.x;
 //     // uint j = id.y;
 //     //
@@ -574,12 +574,12 @@ bool AABBCollision(BoundingBox boxA, BoundingBox boxB)
 //     {
 //         allNodeIndex[i] = 1;     
 //     }
-// }
+}
 
-// #pragma kernel CollisionResponse
-// [numthreads(32, 32, 1)]
-// void CollisionResponse(uint3 id : SV_DispatchThreadID)
-// {    
+#pragma kernel CollisionResponse
+[numthreads(32, 32, 1)]
+void CollisionResponse(uint3 id : SV_DispatchThreadID)
+{    
 //     uint i = id.x;
 //     uint j = id.y;
 //     if (i >= numberObj || j >= numberObj) return;
@@ -679,7 +679,7 @@ bool AABBCollision(BoundingBox boxA, BoundingBox boxB)
 //             }
 //         }
 //     }
-// }
+}
 
 
 #pragma kernel CollisionDetectionResponse
