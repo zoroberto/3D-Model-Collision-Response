@@ -1,0 +1,793 @@
+//uniform data here
+uint nodeCount;
+uint numberObj;
+uint octree_size;
+bool debugTri;
+float dt;
+float3 gravity;
+float invMass;
+float collisionDamping;
+float separationBias;
+float dampingPosition;
+float dampingVelocity;
+float impulseFactor;
+float restitution;
+
+#define Epsilon 0.00001
+#define octree_size 73
+
+struct Tri
+{
+    float3 vertex0;
+    float3 vertex1;
+    float3 vertex2;
+};
+
+struct Line
+{
+    float3 p0;
+    float3 p1;
+
+    float3 direction;
+    float3 origin;
+};
+
+struct vertData
+{
+    float3 pos;
+    float2 uvs;
+    float3 norms;
+};
+struct Triangle
+{
+    uint v0;
+    uint v1;
+    uint v2;
+};
+
+struct BoundingBox
+{
+    float3 min;
+    float3 max;
+};
+
+struct OctreeData
+{
+    float3 min;
+    float3 max;
+    float3 center;
+    float3 size;
+};
+
+struct PairIndex
+{
+    uint i1;
+    uint i2;
+};
+
+// Update pos and vel
+RWStructuredBuffer<float3> Positions;
+RWStructuredBuffer<float3> nodePositions;
+RWStructuredBuffer<float3> Velocities;
+RWStructuredBuffer<float3> randomVelocities;
+RWStructuredBuffer<uint> collisionTesting;
+
+
+// vertices normal
+RWStructuredBuffer<vertData> vertsBuff;
+RWStructuredBuffer<Triangle> Triangles;
+RWStructuredBuffer<uint> TrianglePtr;
+
+// boundaryBB min and max
+RWStructuredBuffer<float3> boundaryPositions;
+RWStructuredBuffer<BoundingBox> boundaryBB;
+
+// BB min and max
+RWStructuredBuffer<BoundingBox> bbMinMax;
+StructuredBuffer<int2> ObjectIndex;
+
+// Octree Data
+RWStructuredBuffer<OctreeData> bbOctree;
+RWStructuredBuffer<uint> collisionResults;
+RWStructuredBuffer<uint> collisionBox;
+
+// Update Vertex AABB Relation
+RWStructuredBuffer<uint> relationVertexAABB;
+
+// octreeIndices 
+RWStructuredBuffer<uint> octreeIndices;
+// counter
+RWStructuredBuffer<uint> nodeIndex;
+RWStructuredBuffer<uint> nodeCounter;
+RWStructuredBuffer<uint> nodeProcessedUnique;
+
+RWStructuredBuffer<uint> allNodeIndex;
+RWStructuredBuffer<uint> allNodeCounter;
+RWStructuredBuffer<uint> nodeUnique;
+
+
+RWStructuredBuffer<uint> nodeInsideBox;
+
+
+// Tri position
+RWStructuredBuffer<Tri> posTriangles;
+RWStructuredBuffer<uint> triArray;
+
+RWStructuredBuffer<int2> collisionNode;
+ 
+RWStructuredBuffer<uint> collidedNodeFlag; 
+
+////////////////////////////////////////////////
+///////////////////  kernel ////////////////////
+////////////////////////////////////////////////
+
+
+#pragma kernel FindBoundaryMinMax
+[numthreads(1, 1, 1)]
+void FindBoundaryMinMax(uint3 i : SV_DispatchThreadID)
+{
+    uint idx = i.x;
+
+    float3 minValue = boundaryPositions[0];
+    float3 maxValue = boundaryPositions[0];
+
+    for (uint i = 0; i < boundaryPositions.Length; i++)
+    {
+        float3 vertex = boundaryPositions[i];
+
+        minValue = min(minValue, vertex); 
+        maxValue = max(maxValue, vertex); 
+    }
+
+    boundaryBB[idx].min = minValue;
+    boundaryBB[idx].max = maxValue;
+}
+
+
+#pragma kernel ImplementOctree
+[numthreads(1024, 1, 1)]
+void ImplementOctree(uint3 i : SV_DispatchThreadID)
+{
+    uint idx = i.x;
+    if(idx >= numberObj) return;
+
+    // Lv0, Initialize Lv0
+    bbOctree[idx * octree_size].center = (bbMinMax[idx].max + bbMinMax[idx].min) / 2;
+    bbOctree[idx * octree_size].size = (bbMinMax[idx].max - bbMinMax[idx].min);
+    bbOctree[idx * octree_size].min = bbMinMax[idx].min; // min value Lv0
+    bbOctree[idx * octree_size].max = bbMinMax[idx].max; // max value Lv0
+
+    float3 center = bbOctree[idx * octree_size].center;
+    float3 size = bbOctree[idx * octree_size].size;
+    // float3 size = bbOctree[idx * octree_size].max - bbOctree[idx * octree_size].min;
+
+    // Lv1, Split to 8 children
+    bbOctree[idx * octree_size + 1].center.x = center.x - (size.x / 4);
+    bbOctree[idx * octree_size + 1].center.y = center.y + (size.y / 4);
+    bbOctree[idx * octree_size + 1].center.z = center.z - (size.z / 4);
+
+    bbOctree[idx * octree_size + 2].center.x = center.x + (size.x / 4);
+    bbOctree[idx * octree_size + 2].center.y = center.y + (size.y / 4);
+    bbOctree[idx * octree_size + 2].center.z = center.z - (size.z / 4);
+
+    bbOctree[idx * octree_size + 3].center.x = center.x - (size.x / 4);
+    bbOctree[idx * octree_size + 3].center.y = center.y - (size.y / 4);
+    bbOctree[idx * octree_size + 3].center.z = center.z - (size.z / 4);
+
+    bbOctree[idx * octree_size + 4].center.x = center.x + (size.x / 4);
+    bbOctree[idx * octree_size + 4].center.y = center.y - (size.y / 4);
+    bbOctree[idx * octree_size + 4].center.z = center.z - (size.z / 4);
+
+    bbOctree[idx * octree_size + 5].center.x = center.x - (size.x / 4);
+    bbOctree[idx * octree_size + 5].center.y = center.y + (size.y / 4);
+    bbOctree[idx * octree_size + 5].center.z = center.z + (size.z / 4);
+
+    bbOctree[idx * octree_size + 6].center.x = center.x + (size.x / 4);
+    bbOctree[idx * octree_size + 6].center.y = center.y + (size.y / 4);
+    bbOctree[idx * octree_size + 6].center.z = center.z + (size.z / 4);
+
+    bbOctree[idx * octree_size + 7].center.x = center.x - (size.x / 4);
+    bbOctree[idx * octree_size + 7].center.y = center.y - (size.y / 4);
+    bbOctree[idx * octree_size + 7].center.z = center.z + (size.z / 4);
+
+    bbOctree[idx * octree_size + 8].center.x = center.x + (size.x / 4);
+    bbOctree[idx * octree_size + 8].center.y = center.y - (size.y / 4);
+    bbOctree[idx * octree_size + 8].center.z = center.z + (size.z / 4);
+
+    for (uint j = 1; j <= 8; j++)
+    {
+        uint il1 = idx * octree_size + j;
+    
+        // Lv1, min and max
+        bbOctree[il1].min.x = bbOctree[il1].center.x - (size.x / 4);
+        bbOctree[il1].min.y = bbOctree[il1].center.y - (size.y / 4);
+        bbOctree[il1].min.z = bbOctree[il1].center.z - (size.z / 4);
+
+        bbOctree[il1].max.x = bbOctree[il1].center.x + (size.x / 4);
+        bbOctree[il1].max.y = bbOctree[il1].center.y + (size.y / 4);
+        bbOctree[il1].max.z = bbOctree[il1].center.z + (size.z / 4);
+
+        // Lv2, Split to 64 children
+        bbOctree[idx * octree_size + j * 8 + 1].center.x = bbOctree[idx * octree_size + j].center.x - (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 1].center.y = bbOctree[idx * octree_size + j].center.y + (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 1].center.z = bbOctree[idx * octree_size + j].center.z - (size.z / 8);
+                                      
+        bbOctree[idx * octree_size + j * 8 + 2].center.x = bbOctree[idx * octree_size + j].center.x + (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 2].center.y = bbOctree[idx * octree_size + j].center.y + (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 2].center.z = bbOctree[idx * octree_size + j].center.z - (size.z / 8);
+                                    
+        bbOctree[idx * octree_size + j * 8 + 3].center.x = bbOctree[idx * octree_size + j].center.x - (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 3].center.y = bbOctree[idx * octree_size + j].center.y - (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 3].center.z = bbOctree[idx * octree_size + j].center.z - (size.z / 8);
+                                       
+        bbOctree[idx * octree_size + j * 8 + 4].center.x = bbOctree[idx * octree_size + j].center.x + (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 4].center.y = bbOctree[idx * octree_size + j].center.y - (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 4].center.z = bbOctree[idx * octree_size + j].center.z - (size.z / 8);
+                                 
+        bbOctree[idx * octree_size + j * 8 + 5].center.x = bbOctree[idx * octree_size + j].center.x - (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 5].center.y = bbOctree[idx * octree_size + j].center.y + (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 5].center.z = bbOctree[idx * octree_size + j].center.z + (size.z / 8);
+                               
+        bbOctree[idx * octree_size + j * 8 + 6].center.x = bbOctree[idx * octree_size + j].center.x + (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 6].center.y = bbOctree[idx * octree_size + j].center.y + (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 6].center.z = bbOctree[idx * octree_size + j].center.z + (size.z / 8);
+                            
+        bbOctree[idx * octree_size + j * 8 + 7].center.x = bbOctree[idx * octree_size + j].center.x - (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 7].center.y = bbOctree[idx * octree_size + j].center.y - (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 7].center.z = bbOctree[idx * octree_size + j].center.z + (size.z / 8);
+                                   
+        bbOctree[idx * octree_size + j * 8 + 8].center.x = bbOctree[idx * octree_size + j].center.x + (size.x / 8);
+        bbOctree[idx * octree_size + j * 8 + 8].center.y = bbOctree[idx * octree_size + j].center.y - (size.y / 8);
+        bbOctree[idx * octree_size + j * 8 + 8].center.z = bbOctree[idx * octree_size + j].center.z + (size.z / 8);
+
+        for (uint k = 1; k <= 8; k++)
+        {
+            // Lv2, min and max
+            bbOctree[idx * octree_size + j * 8 + k].min.x = bbOctree[idx * octree_size + j * 8 + k].center.x - (size.x / 8);
+            bbOctree[idx * octree_size + j * 8 + k].min.y = bbOctree[idx * octree_size + j * 8 + k].center.y - (size.y / 8);
+            bbOctree[idx * octree_size + j * 8 + k].min.z = bbOctree[idx * octree_size + j * 8 + k].center.z - (size.z / 8);
+                                                     
+            bbOctree[idx * octree_size + j * 8 + k].max.x = bbOctree[idx * octree_size + j * 8 + k].center.x + (size.x / 8);
+            bbOctree[idx * octree_size + j * 8 + k].max.y = bbOctree[idx * octree_size + j * 8 + k].center.y + (size.y / 8);
+            bbOctree[idx * octree_size + j * 8 + k].max.z = bbOctree[idx * octree_size + j * 8 + k].center.z + (size.z / 8);
+        }
+    }
+}
+
+
+#pragma kernel removeCollisionsBox
+[numthreads(1024, 1, 1)]
+void removeCollisionsBox(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numberObj * octree_size) return;
+
+    collisionBox[id.x] =  0;
+    // collisionTesting[0] = 0;
+}
+
+
+#pragma kernel RemoveNodeCollision
+[numthreads(1024, 1, 1)]
+void RemoveNodeCollision(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= nodeCount ) return;
+
+    nodeInsideBox[id.x] = 0;
+    collisionNode[id.x] = 0;
+    allNodeIndex[id.x] = 0;
+    
+}
+
+
+#pragma kernel RemoveNodeCounter
+[numthreads(1, 1, 1)]
+void RemoveNodeCounter(uint3 id : SV_DispatchThreadID)
+{
+    nodeCounter[0] = 0; // Set the first element of triCounterBuffer to 0
+    allNodeCounter[0] = 0; // Set the first element of triCounterBuffer to 0
+    nodeProcessedUnique[id.x] = 0; // clear the processedBuffer
+    collidedNodeFlag[0] =0;
+}
+
+
+#pragma kernel computeVerticesNormal
+[numthreads(1024, 1, 1)]
+void computeVerticesNormal(uint3 i : SV_DispatchThreadID) {
+    if (i.x >= nodeCount) return;
+
+    float3 norm = float3(0, 0, 0);
+    uint start = TrianglePtr[i.x];
+    uint end = TrianglePtr[i.x + 1];
+
+    for (uint j = start; j < end; j++)
+    {
+        Triangle t = Triangles[j];
+        float3 v1 = Positions[t.v0];
+        float3 v2 = Positions[t.v1];
+        float3 v3 = Positions[t.v2];
+
+        float3 N = cross(v2 - v1, v3 - v1);
+        norm += N;
+    }
+    vertsBuff[i.x].norms = normalize(norm);
+}
+
+#pragma kernel UpdatePosKernel
+[numthreads(1024, 1, 1)]
+void UpdatePosKernel(uint3 i : SV_DispatchThreadID) {
+    
+    uint idx = i.x;
+
+    if (idx >= nodeCount) return;
+
+     for(uint j=0; j< numberObj; j++)
+    {
+        uint start = ObjectIndex[j].x; 
+        uint end = ObjectIndex[j].y;
+        
+        if(idx >= start && idx < end)
+        {
+            Velocities[idx] += gravity * dt;
+            Positions[idx] += Velocities[idx] * dt;
+            vertsBuff[idx].pos = Positions[idx];
+        }
+    }
+}
+
+
+#pragma kernel FindBBMinMax
+[numthreads(1024, 1, 1)]
+void FindBBMinMax(uint3 i : SV_DispatchThreadID)
+{
+    uint idx = i.x;
+
+    if (idx >= numberObj) return;
+
+    uint start = ObjectIndex[idx].x;
+    uint end = ObjectIndex[idx].y; 
+
+    float3 min_value = Positions[start]; 
+    float3 max_value = Positions[start]; 
+
+    for (uint i = start; i < end; i++) 
+    {
+        float3 vertex = Positions[i];
+
+        min_value = min(min_value, vertex); 
+        max_value = max(max_value, vertex); 
+    }
+
+    bbMinMax[idx].min = min_value;
+    bbMinMax[idx].max = max_value;
+
+}
+
+#pragma kernel CollisionBoundaryHandling
+[numthreads(1024, 1, 1)]
+void CollisionBoundaryHandling(uint3 i : SV_DispatchThreadID)
+{
+    uint idx = i.x;
+
+    if (idx >= nodeCount) return;
+    
+    for(uint j = 0; j < numberObj; j++)
+    {
+        uint start = ObjectIndex[j].x;
+        uint end = ObjectIndex[j].y;
+         
+        if (idx >= start && idx < end)
+        {
+            float3 projectedPosition = Positions[idx];
+            float exceededDistance;
+            
+            // Check for boundary collisions and apply corrections
+            if (bbMinMax[j].min.x < boundaryBB[0].min.x)
+            {
+                exceededDistance = boundaryBB[0].min.x - bbMinMax[j].min.x;
+                projectedPosition.x += exceededDistance;
+                Velocities[idx].x *= -.8 * clamp(collisionDamping, 1.0f, 1.0f);
+            }
+            
+            if (bbMinMax[j].min.y < boundaryBB[0].min.y)
+            {
+                exceededDistance = boundaryBB[0].min.y - bbMinMax[j].min.y;
+                projectedPosition.y += exceededDistance;
+                Velocities[idx].y *= -.8 * clamp(collisionDamping, 1.0f, 1.0f);
+            }
+            
+            if (bbMinMax[j].min.z < boundaryBB[0].min.z)
+            {
+                exceededDistance = boundaryBB[0].min.z - bbMinMax[j].min.z;
+                projectedPosition.z += exceededDistance;
+                Velocities[idx].z *= -.8 * clamp(collisionDamping, 1.0f, 1.0f);
+            }            
+            
+            if (bbMinMax[j].max.x > boundaryBB[0].max.x)
+            {
+                exceededDistance = bbMinMax[j].max.x - boundaryBB[0].max.x;
+                projectedPosition.x -= exceededDistance;
+                Velocities[idx].x *= -.8 * clamp(collisionDamping, 1.0f, 1.0f);
+            }
+            
+            if (bbMinMax[j].max.y > boundaryBB[0].max.y)
+            {
+                exceededDistance = bbMinMax[j].max.y - boundaryBB[0].max.y;
+                projectedPosition.y -= exceededDistance;
+                Velocities[idx].y *= -.8 * clamp(collisionDamping, 1.0f, 1.0f);
+            }
+            
+            if (bbMinMax[j].max.z > boundaryBB[0].max.z)
+            {
+                exceededDistance = bbMinMax[j].max.z - boundaryBB[0].max.z;
+                projectedPosition.z -= exceededDistance;
+                Velocities[idx].z *= -.8 * clamp(collisionDamping, 1.0f, 1.0f);
+            }
+
+            float minVelocityThreshold = 0.001f; // Threshold for low velocity
+            float smallPushForce = 0.1f;         // Small push to prevent sticking
+
+            if (length(Velocities[idx]) < minVelocityThreshold) {
+                Velocities[idx] += normalize(Velocities[idx] + float3(0.01f, 0.01f, 0.01f)) * smallPushForce;
+            }
+
+            
+            Positions[idx] = projectedPosition;
+            vertsBuff[idx].pos = Positions[idx];
+        }
+    }
+}
+
+
+
+bool BBCollision(OctreeData boxA, OctreeData boxB)
+{
+    return 
+    boxA.min.x <= boxB.max.x &&
+    boxA.max.x >= boxB.min.x &&
+    boxA.min.y <= boxB.max.y &&
+    boxA.max.y >= boxB.min.y &&
+    boxA.min.z <= boxB.max.z &&
+    boxA.max.z >= boxB.min.z;
+}
+
+
+bool CheckVertexInsideBox(float3 node, uint i)
+{
+    float3 minPos = float3(0,0,0);
+    float3 maxPos = float3(0,0,0);
+    minPos = bbOctree[i].min;
+    maxPos = bbOctree[i].max;
+
+    if( node.x >= minPos.x && node.x <= maxPos.x &&
+        node.y >= minPos.y && node.y <= maxPos.y &&
+        node.z >= minPos.z && node.z <= maxPos.z)
+        return true;
+        
+    return false;
+}
+
+
+#pragma kernel CheckBBCollision
+[numthreads(32, 32, 1)]
+void CheckBBCollision(uint3 id : SV_DispatchThreadID)
+{
+    uint i =  id.x;
+    uint j =  id.y;
+    if(i >= octreeIndices.Length || j >= octreeIndices.Length) return;
+
+    uint objIndex1 = octreeIndices[i];
+    uint objIndex2 = octreeIndices[j];
+    
+    if(floor(float(objIndex1) / octree_size) == floor(float(objIndex2) / octree_size)) return;  
+    if(floor(float(objIndex1) / octree_size) <= floor(float(objIndex2) / octree_size))
+    {
+        OctreeData boxA = bbOctree[objIndex1];
+        OctreeData boxB = bbOctree[objIndex2];
+
+        bool intersect = BBCollision(boxA, boxB);
+
+        
+        if(intersect)
+        {                
+            //if(boxLv0 || boxLv1 || boxLv2)
+            {
+                collisionBox[objIndex1] = 1;
+                collisionBox[objIndex2] = 1;
+                // count collided vertices inside octree node
+            }
+        }
+    }
+}
+
+#pragma kernel UpdateVertexBoundingRelation
+[numthreads(1024, 1, 1)]
+void UpdateVertexBoundingRelation(uint3 id : SV_DispatchThreadID) 
+{
+    if (id.x >= nodeCount) return;
+    uint idx = id.x;
+
+    for(uint i=0; i< octreeIndices.Length; i++)
+    {
+        if (CheckVertexInsideBox(Positions[idx], octreeIndices[i]))
+        {
+            relationVertexAABB[idx] = octreeIndices[i];
+        }
+    }
+}
+
+
+
+#pragma kernel UpdateBoxContainVertex
+[numthreads(1024, 1, 1)]
+void UpdateBoxContainVertex(uint3 id : SV_DispatchThreadID)
+{
+    uint idx =id.x;
+    if(idx >= nodeCount ) return;
+
+    // int oldIndex;         
+    // InterlockedAdd(nodeCounter[0], 1, oldIndex); // Increment the counter
+    // nodeIndex[oldIndex] = idx; 
+    
+    for(uint i=0; i < collisionBox.Length; i++)
+    {
+        if(collisionBox[i] == 1)
+        {
+            // if (relationVertexAABB[idx] == i && nodeProcessedUnique[idx] == 0)
+            if (relationVertexAABB[idx] == i)
+            {
+                nodeInsideBox[idx] =1; // for debugging or for non-Bounding case
+        
+                // invoke Interlocked function
+                int oldIndex;                    
+                InterlockedAdd(nodeCounter[0], 1, oldIndex); // Increment the counter
+                nodeIndex[oldIndex] = idx; // Store the index of the node
+                nodeProcessedUnique[idx] = 1; // Mark this index as processed, adding not duplicated index
+            }
+        }
+    }
+}
+
+
+bool AABBCollision(BoundingBox boxA, BoundingBox boxB)
+{
+    return 
+    boxA.min.x <= boxB.max.x &&
+    boxA.max.x >= boxB.min.x &&
+    boxA.min.y <= boxB.max.y &&
+    boxA.max.y >= boxB.min.y &&
+    boxA.min.z <= boxB.max.z &&
+    boxA.max.z >= boxB.min.z;
+}
+
+
+// #pragma kernel UpdateCollidedNodeFlag
+// [numthreads(1024, 1, 1)]
+// void UpdateCollidedNodeFlag(uint3 id : SV_DispatchThreadID)
+// {
+//     uint i = id.x;
+//     // uint j = id.y;
+//     //
+//     if (i >= nodeCount && nodeCounter[0] <= 1) return;
+//     
+//
+//     if (nodeCounter[0] > 1)
+//     {
+//         allNodeIndex[i] = 1;     
+//     }
+// }
+
+// #pragma kernel CollisionResponse
+// [numthreads(32, 32, 1)]
+// void CollisionResponse(uint3 id : SV_DispatchThreadID)
+// {    
+//     uint i = id.x;
+//     uint j = id.y;
+//     if (i >= numberObj || j >= numberObj) return;
+//     if (collidedNodeFlag[0] == 0) return;
+//     
+//     uint nodePerObject = nodeCount / numberObj;
+//     uint obj1 = i;
+//     uint obj2 = j;
+//     
+//     if(obj1 == obj2) return;
+//     if(obj1 <= obj2)
+//     {
+//         BoundingBox boxA = bbMinMax[obj1];
+//         BoundingBox boxB = bbMinMax[obj2];
+//         
+//         bool intersect = AABBCollision(boxA, boxB);
+//     
+//         if(intersect)
+//         {
+//             float mass1 = invMass;
+//             float mass2 = invMass;
+//             float nodeMassFactor = 1.0f / nodePerObject;
+//              
+//             float3 centerBoxA = (boxA.max + boxA.min) / 2.0f;
+//             float3 centerBoxB = (boxB.max + boxB.min) / 2.0f;
+//             float3 collisionNormal = normalize(centerBoxA - centerBoxB);
+//             
+//             float halfSizeBoxA = length(boxA.max - boxA.min) / 2.0f;
+//             float halfSizeBoxB = length(boxB.max - boxB.min) / 2.0f;
+//             
+//             float dis = distance(centerBoxA, centerBoxB);
+//             float minSeparation = 0.1f; // Prevent sticking
+//             float penetrationDepth = max(0.0f, (halfSizeBoxA + halfSizeBoxB + minSeparation) - dis);
+//             
+//             
+//             if (penetrationDepth > 0)
+//             {
+//                 float3 positionCorrection = penetrationDepth * separationBias * collisionNormal;
+//     
+//                 float3 correctionA = -(positionCorrection ) * nodeMassFactor;
+//                 float3 correctionB = positionCorrection  * nodeMassFactor;
+//     
+//                 float3 newCenterA = centerBoxA + correctionA  ;
+//                 float3 newCenterB = centerBoxB + correctionB  ;
+//     
+//                 float alpha = dampingPosition;
+//             
+//                 for (uint p1 = obj1 * nodePerObject; p1 < (obj1 + 1) * nodePerObject; p1++)
+//                 {
+//                     float3 node = Positions[p1];
+//                     float3 relativeOffset = node - newCenterB;
+//                     float3 targetPosition = newCenterA + relativeOffset;
+//                     Positions[p1] = lerp(node, targetPosition, alpha);
+//     
+//                 }
+//             
+//                 for (uint p2 = obj2 * nodePerObject; p2 < (obj2 + 1) * nodePerObject; p2++)
+//                 {
+//                     
+//                     float3 node = Positions[p2];
+//                     float3 relativeOffset = node - newCenterA;                    
+//                     float3 targetPosition = newCenterB + relativeOffset;
+//                     Positions[p2] = lerp(node, targetPosition, alpha);
+//     
+//                 }
+//             }
+//             
+//             float3 relativeVelocity = randomVelocities[obj1] - randomVelocities[obj2];
+//             float velocityAlongNormal = dot(relativeVelocity, collisionNormal);
+//             
+//             if (velocityAlongNormal > 0) return;;
+//     
+//             float restitutionValue = restitution;
+//             float impulseMagnitude = -(1 + restitutionValue) * velocityAlongNormal;
+//             impulseMagnitude /= (1 / mass1 + 1 / mass2);
+//             
+//             float dampingVelo = dampingVelocity;
+//             impulseMagnitude *= dampingVelo;
+//             
+//             float3 impulse = impulseMagnitude * collisionNormal;
+//             
+//             float impulseSmoothingFactor = impulseFactor;
+//             float3 smoothedImpulse = impulse * impulseSmoothingFactor;
+//             
+//             for (uint v1 = obj1 * nodePerObject; v1 < (obj1 + 1) * nodePerObject; v1++)
+//             {
+//               
+//                 float3 velocityUpdate = (smoothedImpulse * dt) / mass1;
+//                
+//                 Velocities[v1] -= velocityUpdate;
+//             }
+//                                      
+//             for (uint v2 = obj2 * nodePerObject; v2 < (obj2 + 1) * nodePerObject; v2++)
+//             {
+//                 float3 velocityUpdate = (smoothedImpulse * dt) / mass2;
+//                 Velocities[v2] += velocityUpdate;
+//             }
+//         }
+//     }
+// }
+
+
+#pragma kernel CollisionDetectionResponse
+[numthreads(1024, 1, 1)]
+void CollisionDetectionResponse(uint3 id : SV_DispatchThreadID)
+{
+    uint nodePerObject = nodeCount / numberObj;
+    
+    uint i = id.x;
+    if (i >= nodeCount) return;
+    
+    for (uint m = 0; m < numberObj; m++)
+    {
+        for (uint n = m +1; n < numberObj; n++)
+        {
+            uint obj1 = m;
+            uint obj2 = n;
+            
+            BoundingBox boxA = bbMinMax[obj1];
+            BoundingBox boxB = bbMinMax[obj2];
+            
+            bool intersect = AABBCollision(boxA, boxB);
+
+            
+            if(intersect)
+            {
+                
+                float mass1 = invMass;
+                float mass2 = invMass;
+                float nodeMassFactor = 1.0f / nodePerObject;
+                 
+                float3 centerBoxA = (boxA.max + boxA.min) / 2.0f;
+                float3 centerBoxB = (boxB.max + boxB.min) / 2.0f;
+                float3 collisionNormal = normalize(centerBoxA - centerBoxB);
+                
+                float halfSizeBoxA = length(boxA.max - boxA.min) / 2.0f;
+                float halfSizeBoxB = length(boxB.max - boxB.min) / 2.0f;
+                
+                float dis = distance(centerBoxA, centerBoxB);
+                float minSeparation = 0.8f; // Prevent sticking
+                float penetrationDepth = max(0.0f, (halfSizeBoxA + halfSizeBoxB + minSeparation) - dis);
+    
+                if (penetrationDepth > 0)
+                {
+                    float3 positionCorrection = penetrationDepth * separationBias * collisionNormal;
+                    
+                    float3 correctionA = -positionCorrection * nodeMassFactor;
+                    float3 correctionB =  positionCorrection * nodeMassFactor;
+        
+                    float3 newCenterB = centerBoxB + correctionB  ;
+                    float3 newCenterA = centerBoxA + correctionA  ;
+                    
+                    float alpha = dampingPosition; 
+                   
+                    if ((i >= obj1 * nodePerObject && i < (obj1 + 1) * nodePerObject))
+                    {
+                        float3 node = Positions[i];
+                        float3 relativeOffset = node - newCenterB;   
+                        float3 targetPosition = newCenterA + relativeOffset;
+                        Positions[i] = lerp(node, targetPosition, alpha);                        
+                    }
+                
+    
+                    if ((i >= obj2 * nodePerObject && i < (obj2 + 1) * nodePerObject))
+                    {
+                        float3 node = Positions[i];
+                        float3 relativeOffset = node - newCenterA;                    
+                        float3 targetPosition = newCenterB + relativeOffset;
+                        Positions[i] = lerp(node, targetPosition, alpha);
+                    }
+                }
+    
+                float3 relativeVelocity = randomVelocities[obj1] - randomVelocities[obj2];
+                float velocityAlongNormal = dot(relativeVelocity, collisionNormal);
+            
+                if (velocityAlongNormal > 0) return;;
+    
+                float restitutionValue = restitution;
+                float impulseMagnitude = -(1 + restitutionValue) * velocityAlongNormal;
+                impulseMagnitude /= (1 / mass1 + 1 / mass2);
+            
+                float dampingVelo = dampingVelocity;
+                impulseMagnitude *= dampingVelo;
+            
+                float3 impulse = impulseMagnitude * collisionNormal;
+                float impulseSmoothingFactor = impulseFactor;
+                float3 smoothedImpulse = impulse * impulseSmoothingFactor;
+            
+                if (i >= obj1 * nodePerObject && i < (obj1 + 1) * nodePerObject)
+                {
+                    float3 velocityUpdate = (smoothedImpulse) / mass1;
+                    Velocities[i] -= velocityUpdate;
+
+                    float maxVelocity = .2f; // Set a reasonable max velocity
+                    Velocities[i] = clamp(Velocities[i], -maxVelocity, maxVelocity);
+                }
+                                     
+                if (i >= obj2 * nodePerObject && i < (obj2 + 1) * nodePerObject)
+                {
+                    float3 velocityUpdate = (smoothedImpulse) / mass2;
+                    Velocities[i] += velocityUpdate;
+
+                    float maxVelocity = 0.2f; // Set a reasonable max velocity
+                    Velocities[i] = clamp(Velocities[i], -maxVelocity, maxVelocity);
+                }
+            }
+        }
+    }
+}
+
+
